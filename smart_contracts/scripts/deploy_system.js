@@ -79,6 +79,16 @@ async function main() {
   console.log("VertiportManagement:", vertiportManagementAddress);
   console.log("EVTOLManagement    :", evtolManagementAddress);
   console.log("FlightReservation  :", flightReservationAddress);
+
+  const addresses = {
+    UserVerification:    userVerificationAddress,
+    VertiportManagement: vertiportManagementAddress,
+    EVTOLManagement:     evtolManagementAddress,
+    FlightReservation:   flightReservationAddress,
+  };
+  const outPath = path.resolve(__dirname, "../deployed_addresses.json");
+  fs.writeFileSync(outPath, JSON.stringify(addresses, null, 2));
+  console.log("\nAddresses written to:", outPath);
 }
 
 main().catch((err) => {
