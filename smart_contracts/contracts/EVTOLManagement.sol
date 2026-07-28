@@ -2,30 +2,26 @@
 pragma solidity ^0.8.10;
 
 /// @title Gestión de estados de eVTOLs
-/// @notice Mantiene el estado operativo y la ubicación actual de cada eVTOL.
+/// @notice Mantiene el estado operativo y ubicación de cada eVTOL.
+///         El registro de un eVTOL requiere atestación del Trusted Verifier (Opcion A).
+///
+/// TRABAJO FUTURO: ver docs/10_verificacion_criptografica.md (Opciones B y C).
 contract EVTOLManagement {
-    enum EVTOLState {
-        PARKED,      // estacionado en un vertiport
-        EXPECTING,   // asignado a un viaje, en preparación
-        IN_USE,      // vuelo en curso
-        MAINTENANCE  // fuera de servicio por mantenimiento
-    }
+    enum EVTOLState { PARKED, EXPECTING, IN_USE, MAINTENANCE }
 
     struct EVTOL {
         uint256 id;
         EVTOLState state;
         string currentVertiportId;
-        string activeTripId; // vacío cuando no hay viaje activo
+        string activeTripId;
         bool exists;
     }
 
+    address public trustedVerifier;
+
     mapping(uint256 => EVTOL) private evtols;
 
-    event EVTOLRegistered(
-        uint256 indexed id,
-        string currentVertiportId
-    );
-
+    event EVTOLRegistered(uint256 indexed id, string currentVertiportId);
     event EVTOLStateChanged(
         uint256 indexed id,
         EVTOLState previousState,
@@ -34,59 +30,71 @@ contract EVTOLManagement {
         string activeTripId
     );
 
-    /// @dev Mock de verificación de credencial SSI para eVTOL.
-    function verifyCredentialSignature(
-        bytes memory credential,
-        string memory schemaName,
-        string memory schemaVersion
-    ) internal pure returns (bool) {
-        // Silenciar warnings
-        credential;
-        schemaName;
-        schemaVersion;
-
-        // MOCK: siempre true
-        return true;
+    constructor(address trustedVerifier_) {
+        require(trustedVerifier_ != address(0), "Verifier invalido");
+        trustedVerifier = trustedVerifier_;
     }
 
-    /// @notice Registra un nuevo eVTOL en estado PARKED en un vertiport.
-    /// @param id Identificador único del eVTOL.
+    function setTrustedVerifier(address newVerifier) external {
+        require(msg.sender == trustedVerifier, "No autorizado");
+        require(newVerifier != address(0), "Verifier invalido");
+        trustedVerifier = newVerifier;
+    }
+
+    /// @dev Verifica firma EIP-191 del Trusted Verifier sobre msgHash.
+    function _verifyAttestation(bytes32 msgHash, bytes memory sig) internal view returns (bool) {
+        if (sig.length != 65) return false;
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(sig, 32))
+            s := mload(add(sig, 64))
+            v := byte(0, mload(add(sig, 96)))
+        }
+        if (v < 27) v += 27;
+
+        bytes32 ethHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", msgHash)
+        );
+        address signer = ecrecover(ethHash, v, r, s);
+        return signer != address(0) && signer == trustedVerifier;
+    }
+
+    /// @notice Registra un eVTOL en estado PARKED. Requiere atestación del Trusted Verifier.
+    /// @param id                 Identificador único del eVTOL.
     /// @param initialVertiportId Vertiport donde está inicialmente.
-    /// @param evtolCredential Credencial SSI mock del eVTOL.
+    /// @param evtolCredential    Atributos de la credencial SSI (bytes, para auditoría).
+    /// @param attestation        Firma EIP-191 de keccak256("evtol" || id).
     function registerEVTOL(
         uint256 id,
         string memory initialVertiportId,
-        bytes memory evtolCredential
+        bytes memory evtolCredential,
+        bytes memory attestation
     ) public {
         require(!evtols[id].exists, "EVTOL ya registrado");
 
+        bytes32 msgHash = keccak256(abi.encodePacked("evtol", id));
         require(
-            verifyCredentialSignature(
-                evtolCredential,
-                "Evtol_Crede",
-                "3.0"
-            ),
-            "Credencial de EVTOL invalida"
+            _verifyAttestation(msgHash, attestation),
+            "Atestacion de eVTOL invalida"
         );
 
+        evtolCredential;
+
         EVTOL storage e = evtols[id];
-        e.id = id;
-        e.state = EVTOLState.PARKED;
+        e.id                = id;
+        e.state             = EVTOLState.PARKED;
         e.currentVertiportId = initialVertiportId;
-        e.activeTripId = "";
-        e.exists = true;
+        e.activeTripId      = "";
+        e.exists            = true;
 
         emit EVTOLRegistered(id, initialVertiportId);
         emit EVTOLStateChanged(id, EVTOLState.PARKED, EVTOLState.PARKED, initialVertiportId, "");
     }
 
-    /// @notice Asigna un eVTOL a un viaje y lo pone en estado EXPECTING.
-    /// @param id Id del eVTOL.
-    /// @param tripId Id del viaje asignado.
-    function assignToTrip(
-        uint256 id,
-        string memory tripId
-    ) public {
+    function assignToTrip(uint256 id, string memory tripId) public {
         EVTOL storage e = evtols[id];
         require(e.exists, "EVTOL no encontrado");
         require(e.state == EVTOLState.PARKED, "EVTOL no esta PARKED");
@@ -96,12 +104,9 @@ contract EVTOLManagement {
         EVTOLState previous = e.state;
         e.state = EVTOLState.EXPECTING;
         e.activeTripId = tripId;
-
         emit EVTOLStateChanged(id, previous, e.state, e.currentVertiportId, e.activeTripId);
     }
 
-    /// @notice Marca que el eVTOL inicia el vuelo para el viaje asignado.
-    /// @param id Id del eVTOL.
     function startTrip(uint256 id) public {
         EVTOL storage e = evtols[id];
         require(e.exists, "EVTOL no encontrado");
@@ -110,34 +115,22 @@ contract EVTOLManagement {
 
         EVTOLState previous = e.state;
         e.state = EVTOLState.IN_USE;
-
         emit EVTOLStateChanged(id, previous, e.state, e.currentVertiportId, e.activeTripId);
     }
 
-    /// @notice Completa el viaje y estaciona el eVTOL en el vertiport destino.
-    /// @param id Id del eVTOL.
-    /// @param destinationVertiportId Vertiport donde queda estacionado al final.
-    function completeTrip(
-        uint256 id,
-        string memory destinationVertiportId
-    ) public {
+    function completeTrip(uint256 id, string memory destinationVertiportId) public {
         EVTOL storage e = evtols[id];
         require(e.exists, "EVTOL no encontrado");
         require(e.state == EVTOLState.IN_USE, "EVTOL no esta IN_USE");
         require(bytes(e.activeTripId).length > 0, "No hay viaje activo");
 
         EVTOLState previous = e.state;
-
-        // Actualizar ubicación y estado
         e.state = EVTOLState.PARKED;
         e.currentVertiportId = destinationVertiportId;
         e.activeTripId = "";
-
         emit EVTOLStateChanged(id, previous, e.state, e.currentVertiportId, e.activeTripId);
     }
 
-    /// @notice Pone el eVTOL en mantenimiento (no puede aceptar viajes).
-    /// @param id Id del eVTOL.
     function setMaintenance(uint256 id) public {
         EVTOL storage e = evtols[id];
         require(e.exists, "EVTOL no encontrado");
@@ -146,12 +139,9 @@ contract EVTOLManagement {
 
         EVTOLState previous = e.state;
         e.state = EVTOLState.MAINTENANCE;
-
         emit EVTOLStateChanged(id, previous, e.state, e.currentVertiportId, e.activeTripId);
     }
 
-    /// @notice Saca al eVTOL de mantenimiento y lo deja PARKED.
-    /// @param id Id del eVTOL.
     function finishMaintenance(uint256 id) public {
         EVTOL storage e = evtols[id];
         require(e.exists, "EVTOL no encontrado");
@@ -159,18 +149,15 @@ contract EVTOLManagement {
 
         EVTOLState previous = e.state;
         e.state = EVTOLState.PARKED;
-
         emit EVTOLStateChanged(id, previous, e.state, e.currentVertiportId, e.activeTripId);
     }
 
-    /// @notice Devuelve la info de un eVTOL.
     function getEVTOL(uint256 id) public view returns (EVTOL memory) {
         EVTOL memory e = evtols[id];
         require(e.exists, "EVTOL no encontrado");
         return e;
     }
 
-    /// @notice Devuelve true si el eVTOL esta PARKED y sin viaje activo (apto para asignar).
     function isAvailable(uint256 id) public view returns (bool) {
         EVTOL storage e = evtols[id];
         if (!e.exists) return false;
@@ -179,4 +166,3 @@ contract EVTOLManagement {
         return true;
     }
 }
-

@@ -59,13 +59,16 @@ async function main() {
     account.address,
   ]);
 
-  // 2) VertiportManagement
+  // 2) VertiportManagement (trustedVerifier = deployer)
   const vertiportManagementAddress = await deployContract(
-    "VertiportManagement"
+    "VertiportManagement",
+    [account.address]
   );
 
-  // 3) EVTOLManagement
-  const evtolManagementAddress = await deployContract("EVTOLManagement");
+  // 3) EVTOLManagement (trustedVerifier = deployer)
+  const evtolManagementAddress = await deployContract("EVTOLManagement", [
+    account.address,
+  ]);
 
   // 4) FlightReservation (inyectamos direcciones de los otros contratos)
   const flightReservationAddress = await deployContract("FlightReservation", [

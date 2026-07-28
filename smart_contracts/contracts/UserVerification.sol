@@ -2,10 +2,19 @@
 pragma solidity ^0.8.10;
 
 /// @title Verificacion de usuarios aptos para volar
-/// @notice Mantiene un registro on-chain de si un usuario puede o no reservar vuelos,
-///         en base a credenciales verificadas off-chain (Aries/Indy en produccion).
+/// @notice Mantiene un registro on-chain de si un usuario puede reservar vuelos.
+///         La autorizacion la firma off-chain Django (Trusted Verifier — Opcion A).
+///
+/// TRABAJO FUTURO:
+///   Esta implementacion usa el patron Trusted Verifier (Opcion A): un backend
+///   centralizado firma las atestaciones con una clave secp256k1. El contrato
+///   verifica la firma con ecrecover(). El punto de confianza sigue siendo
+///   centralizado. Ver docs/10_verificacion_criptografica.md para la hoja de
+///   ruta hacia Opcion B (ZK-SNARK) u Opcion C (credenciales BBS+/secp256k1
+///   verificables directamente on-chain sin backend intermediario).
 contract UserVerification {
-    address public issuer; // entidad autorizada a registrar permisos (mock de Aries/backend)
+    address public issuer;
+    address public trustedVerifier;
 
     mapping(address => bool) private _canRide;
 
@@ -15,6 +24,7 @@ contract UserVerification {
     constructor(address initialIssuer) {
         require(initialIssuer != address(0), "Issuer invalido");
         issuer = initialIssuer;
+        trustedVerifier = initialIssuer;
         emit IssuerChanged(address(0), initialIssuer);
     }
 
@@ -23,7 +33,6 @@ contract UserVerification {
         _;
     }
 
-    /// @notice Permite cambiar el issuer autorizado (por ejemplo rotacion de backend/agent).
     function setIssuer(address newIssuer) external onlyIssuer {
         require(newIssuer != address(0), "Issuer invalido");
         address previous = issuer;
@@ -31,72 +40,51 @@ contract UserVerification {
         emit IssuerChanged(previous, newIssuer);
     }
 
-    /// @dev Mock de verificacion de credencial SSI.
-    /// En una integracion real, Aries/Indy verificaria la firma, esquema, version, revocacion, etc.
-    function verifyCredentialSignature(
-        bytes memory credential,
-        string memory schemaName,
-        string memory schemaVersion
-    ) internal pure returns (bool) {
-        // Silenciar warnings
-        credential;
-        schemaName;
-        schemaVersion;
-
-        // MOCK: siempre true. En el futuro aqui podrías chequear un hash,
-        // un identificador de credencial, o delegar a otro contrato.
-        return true;
+    function setTrustedVerifier(address newVerifier) external onlyIssuer {
+        require(newVerifier != address(0), "Verifier invalido");
+        trustedVerifier = newVerifier;
     }
 
-    /// @dev Mock de extraccion del campo "can_ride" de la credencial.
-    /// En produccion, Aries haria esta extraccion y pasaria solo el resultado.
-    function extractCredentialCanRide(
-        bytes memory credential
-    ) internal pure returns (bool) {
-        // MOCK: por simplicidad, si hay algun byte, asumimos can_ride = true.
-        // Esto es solo para mantener la firma; en produccion esto no existiria on-chain.
-        return credential.length > 0;
-    }
+    /// @dev Verifica que `sig` sea una firma EIP-191 del hash dado por `trustedVerifier`.
+    ///      Reemplaza el mock anterior (return true).
+    function _verifyAttestation(bytes32 msgHash, bytes memory sig) internal view returns (bool) {
+        if (sig.length != 65) return false;
 
-    /// @notice Registra o actualiza el permiso de un usuario para volar,
-    ///         en base a una credencial verificada off-chain.
-    /// @param user Address del usuario en la red Besu.
-    /// @param userCredential Credencial SSI mock (por ejemplo Rider_Credential v1.0).
-    /// @return canRide Decision final de si el usuario puede volar.
-    function setRiderPermissionWithCredential(
-        address user,
-        bytes memory userCredential
-    ) public onlyIssuer returns (bool canRide) {
-        require(user != address(0), "Usuario invalido");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(sig, 32))
+            s := mload(add(sig, 64))
+            v := byte(0, mload(add(sig, 96)))
+        }
+        if (v < 27) v += 27;
 
-        // 1. Verificar la credencial (mock)
-        require(
-            verifyCredentialSignature(
-                userCredential,
-                "Rider_Credential",
-                "1.0"
-            ),
-            "Credencial de usuario invalida"
+        bytes32 ethHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", msgHash)
         );
-
-        // 2. Extraer campo can_ride (mock)
-        bool extractedCanRide = extractCredentialCanRide(userCredential);
-
-        // 3. Guardar resultado
-        _canRide[user] = extractedCanRide;
-        emit RiderPermissionSet(user, extractedCanRide);
-
-        return extractedCanRide;
+        address signer = ecrecover(ethHash, v, r, s);
+        return signer != address(0) && signer == trustedVerifier;
     }
 
-    /// @notice Registra directamente la decision canRide para un usuario.
-    /// @dev Esta funcion representa el caso en el que Aries/Indy ya decidio
-    ///      todo off-chain y solo se refleja el resultado en la blockchain.
+    /// @notice Registra o actualiza el permiso de un usuario para volar.
+    /// @param user        Address del usuario en la red Besu.
+    /// @param canRide     Permiso otorgado por la credencial SSI verificada off-chain.
+    /// @param attestation Firma EIP-191 de keccak256("user" || user || canRide)
+    ///                    producida por el Trusted Verifier (Django).
     function setRiderPermission(
         address user,
-        bool canRide
+        bool canRide,
+        bytes memory attestation
     ) public onlyIssuer {
         require(user != address(0), "Usuario invalido");
+
+        bytes32 msgHash = keccak256(abi.encodePacked("user", user, canRide));
+        require(
+            _verifyAttestation(msgHash, attestation),
+            "Atestacion de usuario invalida"
+        );
+
         _canRide[user] = canRide;
         emit RiderPermissionSet(user, canRide);
     }
@@ -106,4 +94,3 @@ contract UserVerification {
         return _canRide[user];
     }
 }
-
