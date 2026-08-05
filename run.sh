@@ -35,7 +35,6 @@ if [ -f "docker-compose-deps.yml" ]; then
 fi
 
 echo "Starting network..."
-docker compose build --pull
 docker compose up --detach
 
 

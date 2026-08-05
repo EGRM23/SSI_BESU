@@ -40,3 +40,8 @@ bootnodes=["enode://8208a3f344695d44e9cf2c023683cbea7b9343e2f70a5e804bd2c93858e9
 # static nodes
 static-nodes-file="/config/static-nodes.json"
 discovery-enabled=true
+
+# tx pool: subir el límite por cuenta (default 0.001 = ~5 txs con pool=4096)
+# Con 10 usuarios enviando desde la misma admin key, necesitamos al menos 10 slots.
+# 0.05 = ~205 txs por cuenta, suficiente para pruebas de carga.
+tx-pool-limit-by-account-percentage=0.05
